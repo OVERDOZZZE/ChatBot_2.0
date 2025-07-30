@@ -741,9 +741,9 @@ def generate_ai_response(session, user_message):
     global AI_API_FAILURE_COUNT
 
     # If AI API is not healthy, use fallback immediately
-    if not is_ai_api_healthy():
-        logger.warning(f"AI API unhealthy, using fallback for {session.sender_id}")
-        return get_fallback_response(session.current_state, user_message)
+    # if not is_ai_api_healthy():
+    #     logger.warning(f"AI API unhealthy, using fallback for {session.sender_id}")
+    #     return get_fallback_response(session.current_state, user_message)
 
     try:
         # Get recent messages for context
