@@ -9,6 +9,10 @@ from openai import OpenAI
 from .models import InstaBotMessage, Product, ConversationSession, Purchase
 from django.utils import timezone
 from datetime import timedelta
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 VERIFY_TOKEN = config('VERIFY_TOKEN')
 LONG_USER_ACCESS_TOKEN = config('LONG_USER_ACCESS_TOKEN')
@@ -28,16 +32,18 @@ def get_intent_prompt():
 - КАТАЛОГ: хочет посмотреть товары, узнать что есть в наличии
 - ИНФОРМАЦИЯ: вопросы о товаре, цене, доставке
 - ЖАЛОБА: недоволен товаром или сервисом
+- БЛАГОДАРНОСТЬ: благодарит за заказ или обслуживание
 - ПРОЧЕЕ: общие вопросы, приветствие
 
-Ответь только одним словом: ПОКУПКА, КАТАЛОГ, ИНФОРМАЦИЯ, ЖАЛОБА или ПРОЧЕЕ."""
+Ответь только одним словом: ПОКУПКА, КАТАЛОГ, ИНФОРМАЦИЯ, ЖАЛОБА, БЛАГОДАРНОСТЬ или ПРОЧЕЕ."""
 
 
 def get_system_prompt_by_state(state, session=None):
     prompts = {
         'idle': """Ты — вежливый помощник магазина триммеров и товаров для парикмахеров в Бишкеке. 
 Отвечай кратко и по делу. Доставка по Бишкеку бесплатная. 
-Предложи посмотреть каталог или помоги с вопросами.""",
+Предложи посмотреть каталог или помоги с вопросами. Если клиент недавно сделал заказ, 
+поблагодари его и предложи дополнительную помощь.""",
 
         'browsing': """Ты показываешь каталог товаров. Предоставь информацию о доступных товарах 
 из базы данных. Помоги клиенту выбрать товар и добавить в корзину.""",
@@ -58,7 +64,10 @@ def get_system_prompt_by_state(state, session=None):
 Извинись и предложи решение проблемы.""",
 
         'inquiry': """Отвечай на общие вопросы о товарах, доставке, оплате. 
-Будь информативным но кратким."""
+Будь информативным но кратким.""",
+
+        'post_purchase': """Клиент только что сделал заказ. Отвечай дружелюбно, 
+предлагай дополнительную помощь или товары. Напомни о возможности связаться при необходимости."""
     }
 
     base_prompt = prompts.get(state, prompts['idle'])
@@ -145,6 +154,15 @@ def extract_phone_from_message(message):
     return None
 
 
+def has_recent_purchase(sender_id, hours=2):
+    """Check if user made a purchase recently"""
+    time_threshold = timezone.now() - timedelta(hours=hours)
+    return Purchase.objects.filter(
+        sender_id=sender_id,
+        timestamp__gte=time_threshold
+    ).exists()
+
+
 @csrf_exempt
 def webhook(request):
     if request.method == 'GET':
@@ -169,6 +187,7 @@ def webhook(request):
             return JsonResponse({"status": "Event processed"})
 
         except Exception as e:
+            logger.error(f"Webhook error: {str(e)}")
             return JsonResponse({"error": str(e)}, status=400)
 
 
@@ -192,190 +211,278 @@ def process_message(data):
         if not text:
             continue
 
-        # Clean up old messages
-        expiry = timezone.now() - timedelta(hours=24)
-        InstaBotMessage.objects.filter(sender_id=sender_id, timestamp__lt=expiry).delete()
+        try:
+            # Clean up old messages
+            expiry = timezone.now() - timedelta(hours=24)
+            InstaBotMessage.objects.filter(sender_id=sender_id, timestamp__lt=expiry).delete()
 
-        # Save user message
-        InstaBotMessage.objects.create(
-            sender_id=sender_id,
-            role="user",
-            content=text
-        )
+            # Save user message
+            InstaBotMessage.objects.create(
+                sender_id=sender_id,
+                role="user",
+                content=text
+            )
 
-        # Get or create session
-        session, created = ConversationSession.objects.get_or_create(
-            sender_id=sender_id,
-            defaults={'current_state': 'idle'}
-        )
+            # Get or create session
+            session, created = ConversationSession.objects.get_or_create(
+                sender_id=sender_id,
+                defaults={'current_state': 'idle'}
+            )
 
-        # Process message based on current state
-        reply = handle_conversation_flow(session, text)
+            # Process message based on current state
+            reply = handle_conversation_flow(session, text)
 
-        # Save bot response
-        InstaBotMessage.objects.create(
-            sender_id=sender_id,
-            role="assistant",
-            content=reply
-        )
+            # Save bot response
+            InstaBotMessage.objects.create(
+                sender_id=sender_id,
+                role="assistant",
+                content=reply
+            )
 
-        send_message(reply, str(sender_id))
+            send_message(reply, str(sender_id))
+
+        except Exception as e:
+            logger.error(f"Error processing message from {sender_id}: {str(e)}")
+            # Send fallback message
+            fallback_message = "Извините, произошла техническая ошибка. Попробуйте еще раз или напишите 'помощь' для начала."
+            send_message(fallback_message, str(sender_id))
 
 
 def handle_conversation_flow(session, user_message):
     """Main conversation flow handler"""
 
-    # Check for confirmation word first
-    if user_message.strip().lower() == "подтвердить" and session.current_state == 'purchase_confirmation':
-        return handle_purchase_confirmation(session, user_message)
+    try:
+        # Check for confirmation word first
+        if user_message.strip().lower() == "подтвердить" and session.current_state == 'purchase_confirmation':
+            return handle_purchase_confirmation(session, user_message)
 
-    # Handle different states
-    if session.current_state == 'idle':
-        return handle_idle_state(session, user_message)
+        # Check for reset commands
+        if user_message.lower() in ['помощь', 'начать', 'старт', 'reset']:
+            session.reset_session()
+            return "Привет! Я помощник магазина триммеров и товаров для парикмахеров. Чем могу помочь?\n\n• Посмотреть каталог\n• Сделать заказ\n• Задать вопрос"
 
-    elif session.current_state == 'browsing':
-        return handle_browsing_state(session, user_message)
+        # Handle different states
+        if session.current_state == 'idle':
+            return handle_idle_state(session, user_message)
 
-    elif session.current_state == 'purchase_product_selection':
-        return handle_product_selection_state(session, user_message)
+        elif session.current_state == 'browsing':
+            return handle_browsing_state(session, user_message)
 
-    elif session.current_state == 'purchase_collecting_phone':
-        return handle_phone_collection_state(session, user_message)
+        elif session.current_state == 'purchase_product_selection':
+            return handle_product_selection_state(session, user_message)
 
-    elif session.current_state == 'purchase_collecting_address':
-        return handle_address_collection_state(session, user_message)
+        elif session.current_state == 'purchase_collecting_phone':
+            return handle_phone_collection_state(session, user_message)
 
-    elif session.current_state == 'purchase_confirmation':
-        return handle_confirmation_state(session, user_message)
+        elif session.current_state == 'purchase_collecting_address':
+            return handle_address_collection_state(session, user_message)
 
-    elif session.current_state == 'complaint':
-        return handle_complaint_state(session, user_message)
+        elif session.current_state == 'purchase_confirmation':
+            return handle_confirmation_state(session, user_message)
 
-    elif session.current_state == 'inquiry':
-        return handle_inquiry_state(session, user_message)
+        elif session.current_state == 'complaint':
+            return handle_complaint_state(session, user_message)
 
-    else:
+        elif session.current_state == 'inquiry':
+            return handle_inquiry_state(session, user_message)
+
+        elif session.current_state == 'post_purchase':
+            return handle_post_purchase_state(session, user_message)
+
+        else:
+            session.reset_session()
+            return "Что-то пошло не так. Начнем сначала. Чем могу помочь?"
+
+    except Exception as e:
+        logger.error(f"Error in conversation flow for {session.sender_id}: {str(e)}")
         session.reset_session()
-        return "Что-то пошло не так. Начнем сначала. Чем могу помочь?"
+        return "Произошла ошибка. Давайте начнем сначала. Чем могу помочь?"
 
 
 def handle_idle_state(session, user_message):
     """Handle messages when bot is in idle state"""
 
-    # Classify intent using AI
-    intent = classify_intent(user_message)
+    try:
+        # Check if user recently made a purchase
+        if has_recent_purchase(session.sender_id):
+            session.current_state = 'post_purchase'
+            session.save()
+            return handle_post_purchase_state(session, user_message)
 
-    if intent == 'КАТАЛОГ':
-        session.current_state = 'browsing'
+        # Classify intent using AI
+        intent = classify_intent(user_message)
+
+        if intent == 'КАТАЛОГ':
+            session.current_state = 'browsing'
+            session.save()
+            return f"📋 Вот наш каталог:\n\n{format_product_catalog()}\n\nЧто вас интересует?"
+
+        elif intent == 'ПОКУПКА':
+            session.current_state = 'purchase_product_selection'
+            session.save()
+            return f"Отлично! Давайте выберем товары:\n\n{format_product_catalog()}\n\nНапишите название товара, который хотите купить."
+
+        elif intent == 'ИНФОРМАЦИЯ':
+            session.current_state = 'inquiry'
+            session.save()
+            return generate_ai_response(session, user_message)
+
+        elif intent == 'ЖАЛОБА':
+            session.current_state = 'complaint'
+            session.save()
+            return "Мне очень жаль, что у вас возникли проблемы. Расскажите подробнее, что случилось, и я постараюсь помочь."
+
+        elif intent == 'БЛАГОДАРНОСТЬ':
+            return "Спасибо большое! Рады были вам помочь. Если понадобится что-то еще, обращайтесь! 😊"
+
+        else:
+            return generate_ai_response(session, user_message)
+
+    except Exception as e:
+        logger.error(f"Error in idle state for {session.sender_id}: {str(e)}")
+        return "Привет! Чем могу помочь? Могу показать каталог товаров или ответить на ваши вопросы."
+
+
+def handle_post_purchase_state(session, user_message):
+    """Handle messages after recent purchase"""
+
+    try:
+        # Check for new purchase intent
+        if any(word in user_message.lower() for word in ['купить', 'заказать', 'еще', 'также', 'тоже']):
+            session.current_state = 'purchase_product_selection'
+            session.save()
+            return f"Конечно! Вот наш каталог:\n\n{format_product_catalog()}\n\nЧто хотите добавить к заказу?"
+
+        # Check for catalog request
+        if any(word in user_message.lower() for word in ['каталог', 'товары', 'что есть']):
+            session.current_state = 'browsing'
+            session.save()
+            return f"📋 Наш каталог:\n\n{format_product_catalog()}"
+
+        # Default response for post-purchase
+        session.current_state = 'idle'
         session.save()
-        return f"📋 Вот наш каталог:\n\n{format_product_catalog()}\n\nЧто вас интересует?"
 
-    elif intent == 'ПОКУПКА':
-        session.current_state = 'purchase_product_selection'
+        response = generate_ai_response(session, user_message)
+        if not response or "техническая ошибка" in response.lower():
+            response = "Спасибо за ваш заказ! Есть ли что-то еще, чем могу помочь? Могу показать другие товары или ответить на вопросы."
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error in post-purchase state for {session.sender_id}: {str(e)}")
+        session.current_state = 'idle'
         session.save()
-        return f"Отлично! Давайте выберем товары:\n\n{format_product_catalog()}\n\nНапишите название товара, который хотите купить."
-
-    elif intent == 'ИНФОРМАЦИЯ':
-        session.current_state = 'inquiry'
-        session.save()
-        return generate_ai_response(session, user_message)
-
-    elif intent == 'ЖАЛОБА':
-        session.current_state = 'complaint'
-        session.save()
-        return "Мне очень жаль, что у вас возникли проблемы. Расскажите подробнее, что случилось, и я постараюсь помочь."
-
-    else:
-        return generate_ai_response(session, user_message)
+        return "Спасибо за заказ! Чем еще могу помочь?"
 
 
 def handle_browsing_state(session, user_message):
     """Handle browsing catalog state"""
 
-    # Check if user wants to buy something
-    if any(word in user_message.lower() for word in ['купить', 'заказать', 'хочу', 'возьму']):
-        session.current_state = 'purchase_product_selection'
-        session.save()
-        return "Отлично! Напишите название товара, который хотите купить."
+    try:
+        # Check if user wants to buy something
+        if any(word in user_message.lower() for word in ['купить', 'заказать', 'хочу', 'возьму']):
+            session.current_state = 'purchase_product_selection'
+            session.save()
+            return "Отлично! Напишите название товара, который хотите купить."
 
-    return generate_ai_response(session, user_message)
+        return generate_ai_response(session, user_message)
+
+    except Exception as e:
+        logger.error(f"Error in browsing state for {session.sender_id}: {str(e)}")
+        return f"Вот наш каталог:\n\n{format_product_catalog()}\n\nЧто вас интересует?"
 
 
 def handle_product_selection_state(session, user_message):
     """Handle product selection for purchase"""
 
-    # Check for product in message
-    product_id, quantity = extract_product_from_message(user_message)
+    try:
+        # Check for product in message
+        product_id, quantity = extract_product_from_message(user_message)
 
-    if product_id:
-        session.add_product(product_id, quantity)
-        session.save()
-
-        product = Product.objects.get(id=product_id)
-        response = f"✅ Добавил в корзину: {product.name} x{quantity}\n\n"
-        response += f"Ваша корзина:\n{format_cart(session)}\n\n"
-        response += "Хотите добавить еще товары или оформить заказ?"
-        return response
-
-    # Check if wants to proceed to order
-    if any(word in user_message.lower() for word in ['заказ', 'оформить', 'купить', 'хватит', 'достаточно']):
-        if session.get_selected_products():
-            session.current_state = 'purchase_collecting_phone'
+        if product_id:
+            session.add_product(product_id, quantity)
             session.save()
-            return f"Отлично! Ваши товары:\n{format_cart(session)}\n\nДля оформления заказа нужен ваш номер телефона:"
-        else:
-            return "Ваша корзина пуста. Сначала выберите товары из каталога."
 
-    return f"Извините, не нашел такой товар. Вот что у нас есть:\n\n{format_product_catalog()}"
+            product = Product.objects.get(id=product_id)
+            response = f"✅ Добавил в корзину: {product.name} x{quantity}\n\n"
+            response += f"Ваша корзина:\n{format_cart(session)}\n\n"
+            response += "Хотите добавить еще товары или оформить заказ?"
+            return response
+
+        # Check if wants to proceed to order
+        if any(word in user_message.lower() for word in ['заказ', 'оформить', 'купить', 'хватит', 'достаточно']):
+            if session.get_selected_products():
+                session.current_state = 'purchase_collecting_phone'
+                session.save()
+                return f"Отлично! Ваши товары:\n{format_cart(session)}\n\nДля оформления заказа нужен ваш номер телефона:"
+            else:
+                return "Ваша корзина пуста. Сначала выберите товары из каталога."
+
+        return f"Извините, не нашел такой товар. Вот что у нас есть:\n\n{format_product_catalog()}"
+
+    except Exception as e:
+        logger.error(f"Error in product selection for {session.sender_id}: {str(e)}")
+        return f"Давайте выберем товар:\n\n{format_product_catalog()}"
 
 
 def handle_phone_collection_state(session, user_message):
     """Handle phone number collection"""
 
-    phone = extract_phone_from_message(user_message)
+    try:
+        phone = extract_phone_from_message(user_message)
 
-    if phone:
-        session.collected_phone = phone
-        session.current_state = 'purchase_collecting_address'
-        session.save()
-        return "Спасибо! Теперь укажите адрес доставки в Бишкеке:"
+        if phone:
+            session.collected_phone = phone
+            session.current_state = 'purchase_collecting_address'
+            session.save()
+            return "Спасибо! Теперь укажите адрес доставки в Бишкеке:"
 
-    return "Пожалуйста, укажите корректный номер телефона (например: +996 555 123 456 или 0555 123 456):"
+        return "Пожалуйста, укажите корректный номер телефона (например: +996 555 123 456 или 0555 123 456):"
+
+    except Exception as e:
+        logger.error(f"Error in phone collection for {session.sender_id}: {str(e)}")
+        return "Укажите ваш номер телефона для связи:"
 
 
 def handle_address_collection_state(session, user_message):
     """Handle address collection"""
 
-    if len(user_message.strip()) > 10:  # Basic validation
-        session.collected_address = user_message.strip()
-        session.current_state = 'purchase_confirmation'
-        session.save()
+    try:
+        if len(user_message.strip()) > 10:  # Basic validation
+            session.collected_address = user_message.strip()
+            session.current_state = 'purchase_confirmation'
+            session.save()
 
-        # Prepare order summary
-        products_info = []
-        total = 0
+            # Prepare order summary
+            products_info = []
+            total = 0
 
-        for item in session.get_selected_products():
-            try:
-                product = Product.objects.get(id=item['product_id'])
-                quantity = item['quantity']
-                subtotal = product.price * quantity
-                total += subtotal
-                products_info.append(f"• {product.name} x{quantity} = {subtotal} сом")
-            except Product.DoesNotExist:
-                continue
+            for item in session.get_selected_products():
+                try:
+                    product = Product.objects.get(id=item['product_id'])
+                    quantity = item['quantity']
+                    subtotal = product.price * quantity
+                    total += subtotal
+                    products_info.append(f"• {product.name} x{quantity} = {subtotal} сом")
+                except Product.DoesNotExist:
+                    continue
 
-        summary = f"📋 Подтверждение заказа:\n\n"
-        summary += "\n".join(products_info)
-        summary += f"\n\nИтого: {total} сом"
-        summary += f"\nТелефон: {session.collected_phone}"
-        summary += f"\nАдрес: {session.collected_address}"
-        summary += f"\nДоставка: БЕСПЛАТНО"
-        summary += f"\n\n✅ Для подтверждения заказа напишите: Подтвердить"
+            summary = f"📋 Подтверждение заказа:\n\n"
+            summary += "\n".join(products_info)
+            summary += f"\n\nИтого: {total} сом"
+            summary += f"\nТелефон: {session.collected_phone}"
+            summary += f"\nАдрес: {session.collected_address}"
+            summary += f"\nДоставка: БЕСПЛАТНО"
+            summary += f"\n\n✅ Для подтверждения заказа напишите: Подтвердить"
 
-        return summary
+            return summary
 
-    return "Пожалуйста, укажите подробный адрес доставки:"
+        return "Пожалуйста, укажите подробный адрес доставки:"
+
+    except Exception as e:
+        logger.error(f"Error in address collection for {session.sender_id}: {str(e)}")
+        return "Укажите адрес доставки в Бишкеке:"
 
 
 def handle_confirmation_state(session, user_message):
@@ -423,41 +530,63 @@ def handle_purchase_confirmation(session, user_message):
         purchase.set_products_data(products_data)
         purchase.save()
 
-        # Reset session
-        session.reset_session()
+        # Set to post-purchase state instead of completely resetting
+        session.current_state = 'post_purchase'
+        session.selected_products = None
+        session.collected_phone = None
+        session.collected_address = None
+        session.save()
 
         response = f"🎉 Заказ №{purchase.id} подтвержден!\n\n"
         response += f"Мы свяжемся с вами по телефону {purchase.phone_number} для уточнения деталей доставки.\n\n"
         response += f"Доставка по адресу: {purchase.address}\n"
         response += f"Сумма заказа: {total_amount} сом\n"
         response += f"Доставка: БЕСПЛАТНО\n\n"
-        response += "Спасибо за покупку! 😊"
+        response += "Спасибо за покупку! 😊\n\n"
+        response += "Нужно что-то еще?"
 
         return response
 
     except Exception as e:
+        logger.error(f"Error in purchase confirmation for {session.sender_id}: {str(e)}")
         return f"Произошла ошибка при оформлении заказа. Попробуйте еще раз или свяжитесь с нами напрямую."
 
 
 def handle_complaint_state(session, user_message):
     """Handle customer complaints"""
 
-    session.current_state = 'idle'
-    session.save()
+    try:
+        session.current_state = 'idle'
+        session.save()
 
-    response = generate_ai_response(session, user_message)
-    response += "\n\nВаша жалоба принята. Мы обязательно разберем ситуацию."
+        response = generate_ai_response(session, user_message)
+        if not response or "техническая ошибка" in response.lower():
+            response = "Мне очень жаль, что возникли проблемы. Мы обязательно разберем ситуацию и свяжемся с вами."
 
-    return response
+        response += "\n\nВаша жалоба принята. Мы обязательно разберем ситуацию."
+        return response
+
+    except Exception as e:
+        logger.error(f"Error handling complaint for {session.sender_id}: {str(e)}")
+        return "Мне очень жаль, что у вас возникли проблемы. Мы обязательно разберем ситуацию."
 
 
 def handle_inquiry_state(session, user_message):
     """Handle general inquiries"""
 
-    session.current_state = 'idle'
-    session.save()
+    try:
+        session.current_state = 'idle'
+        session.save()
 
-    return generate_ai_response(session, user_message)
+        response = generate_ai_response(session, user_message)
+        if not response or "техническая ошибка" in response.lower():
+            response = "Спасибо за вопрос! Если нужна дополнительная информация, обращайтесь. Могу показать каталог товаров или помочь с выбором."
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error handling inquiry for {session.sender_id}: {str(e)}")
+        return "Чем могу помочь? Могу показать каталог товаров или ответить на ваши вопросы."
 
 
 def classify_intent(user_message):
@@ -469,71 +598,82 @@ def classify_intent(user_message):
             messages=[
                 {"role": "system", "content": get_intent_prompt()},
                 {"role": "user", "content": user_message}
-            ]
+            ],
+            timeout=10  # Add timeout to prevent hanging
         )
 
         intent = completion.choices[0].message.content.strip().upper()
 
-        if intent in ['ПОКУПКА', 'КАТАЛОГ', 'ИНФОРМАЦИЯ', 'ЖАЛОБА', 'ПРОЧЕЕ']:
+        if intent in ['ПОКУПКА', 'КАТАЛОГ', 'ИНФОРМАЦИЯ', 'ЖАЛОБА', 'БЛАГОДАРНОСТЬ', 'ПРОЧЕЕ']:
             return intent
         else:
             return 'ПРОЧЕЕ'
 
-    except:
+    except Exception as e:
+        logger.error(f"Error classifying intent: {str(e)}")
         return 'ПРОЧЕЕ'
 
 
 def generate_ai_response(session, user_message):
     """Generate AI response based on current state"""
 
-    # Get recent messages for context
-    recent_messages = InstaBotMessage.objects.filter(
-        sender_id=session.sender_id
-    ).order_by('-timestamp')[:MAX_HISTORY_LENGTH]
-    recent_messages = list(reversed(recent_messages))
-
-    # Prepare context
-    messages = [{"role": "system", "content": get_system_prompt_by_state(session.current_state, session)}]
-
-    # Add product catalog to context
-    if session.current_state in ['browsing', 'purchase_product_selection']:
-        products_context = f"Доступные товары:\n{format_product_catalog()}"
-        messages.append({"role": "system", "content": products_context})
-
-    # Add conversation history
-    messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages[-5:]]  # Last 5 messages
-
     try:
+        # Get recent messages for context
+        recent_messages = InstaBotMessage.objects.filter(
+            sender_id=session.sender_id
+        ).order_by('-timestamp')[:MAX_HISTORY_LENGTH]
+        recent_messages = list(reversed(recent_messages))
+
+        # Prepare context
+        messages = [{"role": "system", "content": get_system_prompt_by_state(session.current_state, session)}]
+
+        # Add product catalog to context
+        if session.current_state in ['browsing', 'purchase_product_selection', 'post_purchase']:
+            products_context = f"Доступные товары:\n{format_product_catalog()}"
+            messages.append({"role": "system", "content": products_context})
+
+        # Add conversation history
+        messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages[-5:]]  # Last 5 messages
+
         completion = client.chat.completions.create(
             model="z-ai/glm-4.5-air:free",
-            messages=messages
+            messages=messages,
+            timeout=15,  # Add timeout
+            max_tokens=200  # Limit response length
         )
 
-        return completion.choices[0].message.content
+        response = completion.choices[0].message.content
+        return response if response else "Чем могу помочь?"
 
     except Exception as e:
-        return "Извините, произошла техническая ошибка. Попробуйте еще раз."
+        logger.error(f"Error generating AI response for {session.sender_id}: {str(e)}")
+        return None  # Return None to trigger fallback responses
 
 
 def send_message(reply, recipient_id):
     """Send message via Instagram Graph API"""
 
-    url = f'https://graph.instagram.com/v21.0/me/messages'
-    headers = {
-        'Authorization': f'Bearer {LONG_USER_ACCESS_TOKEN}',
-        'Content-Type': "application/json"
-    }
-    json_body = {
-        'recipient': {
-            'id': int(recipient_id)
-        },
-        'message': {
-            'text': str(reply)
+    try:
+        url = f'https://graph.instagram.com/v21.0/me/messages'
+        headers = {
+            'Authorization': f'Bearer {LONG_USER_ACCESS_TOKEN}',
+            'Content-Type': "application/json"
         }
-    }
+        json_body = {
+            'recipient': {
+                'id': int(recipient_id)
+            },
+            'message': {
+                'text': str(reply)
+            }
+        }
 
-    response = requests.post(url, headers=headers, json=json_body)
-    return response.json()
+        response = requests.post(url, headers=headers, json=json_body, timeout=10)
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Error sending message to {recipient_id}: {str(e)}")
+        return {"error": str(e)}
 
 
 def process_comment(data):
