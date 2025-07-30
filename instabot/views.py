@@ -10,6 +10,7 @@ from .models import InstaBotMessage, Product, ConversationSession, Purchase
 from django.utils import timezone
 from datetime import timedelta
 import logging
+import time
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ LONG_USER_ACCESS_TOKEN = config('LONG_USER_ACCESS_TOKEN')
 OPENAI_API_KEY = config('OPENAI_API_KEY')
 BOT_ID = config('BOT_ID')
 MAX_HISTORY_LENGTH = 10
+
+# AI API health tracking
+AI_API_LAST_SUCCESS = None
+AI_API_FAILURE_COUNT = 0
+AI_API_MAX_FAILURES = 3
+AI_API_TIMEOUT = 10
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -137,7 +144,88 @@ def extract_product_from_message(message):
     return None, None
 
 
-def extract_phone_from_message(message):
+def check_ai_api_health():
+    """Check if AI API is responding"""
+    global AI_API_LAST_SUCCESS, AI_API_FAILURE_COUNT
+
+    try:
+        # Simple test request
+        completion = client.chat.completions.create(
+            model="z-ai/glm-4.5-air:free",
+            messages=[
+                {"role": "system", "content": "Ответь 'OK'"},
+                {"role": "user", "content": "тест"}
+            ],
+            timeout=5,
+            max_tokens=10
+        )
+
+        if completion.choices[0].message.content:
+            AI_API_LAST_SUCCESS = time.time()
+            AI_API_FAILURE_COUNT = 0
+            return True
+
+    except Exception as e:
+        logger.error(f"AI API health check failed: {str(e)}")
+        AI_API_FAILURE_COUNT += 1
+        return False
+
+    return False
+
+
+def is_ai_api_healthy():
+    """Check if AI API is considered healthy"""
+    global AI_API_FAILURE_COUNT, AI_API_LAST_SUCCESS
+
+    # If too many recent failures, consider unhealthy
+    if AI_API_FAILURE_COUNT >= AI_API_MAX_FAILURES:
+        return False
+
+    # If last success was more than 5 minutes ago, do a health check
+    if AI_API_LAST_SUCCESS is None or (time.time() - AI_API_LAST_SUCCESS) > 300:
+        return check_ai_api_health()
+
+    return True
+
+
+def get_fallback_response(state, user_message):
+    """Get fallback response when AI API is not working"""
+
+    fallback_responses = {
+        'idle': """Привет! К сожалению, у нас временные технические проблемы с AI, но я все равно могу помочь:
+
+• Написать 'каталог' - покажу все товары
+• Написать 'купить [название товара]' - оформлю заказ
+• Написать 'помощь' - покажу команды
+
+Что вас интересует?""",
+
+        'browsing': f"Вот наш каталог товаров:\n\n{format_product_catalog()}\n\nДля заказа напишите: купить [название товара]",
+
+        'purchase_product_selection': f"Выберите товар из каталога:\n\n{format_product_catalog()}\n\nНапишите название товара, который хотите купить.",
+
+        'post_purchase': """Спасибо за ваш заказ! 
+
+Могу предложить:
+• 'каталог' - посмотреть другие товары
+• 'помощь' - список команд
+• задать вопрос о доставке
+
+Чем еще помочь?""",
+
+        'complaint': "Понимаю ваше недовольство. Мы обязательно разберем ситуацию. Можете оставить свои контакты, и мы свяжемся с вами для решения проблемы.",
+
+        'inquiry': """Отвечу на основные вопросы:
+
+• Доставка по Бишкеку - БЕСПЛАТНО
+• Оплата при получении
+• Гарантия на все товары
+• Работаем ежедневно
+
+Нужна другая информация?"""
+    }
+
+    return fallback_responses.get(state, fallback_responses['idle'])
     """Extract phone number from message"""
     # Look for phone patterns
     phone_patterns = [
@@ -364,8 +452,8 @@ def handle_post_purchase_state(session, user_message):
         session.save()
 
         response = generate_ai_response(session, user_message)
-        if not response or "техническая ошибка" in response.lower():
-            response = "Спасибо за ваш заказ! Есть ли что-то еще, чем могу помочь? Могу показать другие товары или ответить на вопросы."
+        if not response:
+            response = get_fallback_response(session.current_state, user_message)
 
         return response
 
@@ -560,8 +648,8 @@ def handle_complaint_state(session, user_message):
         session.save()
 
         response = generate_ai_response(session, user_message)
-        if not response or "техническая ошибка" in response.lower():
-            response = "Мне очень жаль, что возникли проблемы. Мы обязательно разберем ситуацию и свяжемся с вами."
+        if not response:
+            response = get_fallback_response('complaint', user_message)
 
         response += "\n\nВаша жалоба принята. Мы обязательно разберем ситуацию."
         return response
@@ -579,8 +667,8 @@ def handle_inquiry_state(session, user_message):
         session.save()
 
         response = generate_ai_response(session, user_message)
-        if not response or "техническая ошибка" in response.lower():
-            response = "Спасибо за вопрос! Если нужна дополнительная информация, обращайтесь. Могу показать каталог товаров или помочь с выбором."
+        if not response:
+            response = get_fallback_response('inquiry', user_message)
 
         return response
 
@@ -590,32 +678,67 @@ def handle_inquiry_state(session, user_message):
 
 
 def classify_intent(user_message):
-    """Classify user intent using AI"""
+    """Classify user intent using AI with fallback"""
+    global AI_API_FAILURE_COUNT
 
-    try:
-        completion = client.chat.completions.create(
-            model="z-ai/glm-4.5-air:free",
-            messages=[
-                {"role": "system", "content": get_intent_prompt()},
-                {"role": "user", "content": user_message}
-            ],
-            timeout=10  # Add timeout to prevent hanging
-        )
+    # Simple keyword-based fallback classification
+    message_lower = user_message.lower()
 
-        intent = completion.choices[0].message.content.strip().upper()
+    # Check for purchase intent
+    if any(word in message_lower for word in ['купить', 'заказать', 'хочу', 'возьму', 'оформить']):
+        return 'ПОКУПКА'
 
-        if intent in ['ПОКУПКА', 'КАТАЛОГ', 'ИНФОРМАЦИЯ', 'ЖАЛОБА', 'БЛАГОДАРНОСТЬ', 'ПРОЧЕЕ']:
-            return intent
-        else:
-            return 'ПРОЧЕЕ'
+    # Check for catalog intent
+    if any(word in message_lower for word in ['каталог', 'товары', 'что есть', 'показать', 'посмотреть']):
+        return 'КАТАЛОГ'
 
-    except Exception as e:
-        logger.error(f"Error classifying intent: {str(e)}")
-        return 'ПРОЧЕЕ'
+    # Check for complaints
+    if any(word in message_lower for word in ['жалоба', 'плохо', 'не работает', 'недоволен', 'проблема']):
+        return 'ЖАЛОБА'
+
+    # Check for gratitude
+    if any(word in message_lower for word in ['спасибо', 'благодарю', 'отлично', 'хорошо']):
+        return 'БЛАГОДАРНОСТЬ'
+
+    # Try AI classification if API is healthy
+    if is_ai_api_healthy():
+        try:
+            completion = client.chat.completions.create(
+                model="z-ai/glm-4.5-air:free",
+                messages=[
+                    {"role": "system", "content": get_intent_prompt()},
+                    {"role": "user", "content": user_message}
+                ],
+                timeout=AI_API_TIMEOUT,
+                max_tokens=20
+            )
+
+            intent = completion.choices[0].message.content.strip().upper()
+
+            # Reset failure count on success
+            AI_API_FAILURE_COUNT = 0
+            global AI_API_LAST_SUCCESS
+            AI_API_LAST_SUCCESS = time.time()
+
+            if intent in ['ПОКУПКА', 'КАТАЛОГ', 'ИНФОРМАЦИЯ', 'ЖАЛОБА', 'БЛАГОДАРНОСТЬ', 'ПРОЧЕЕ']:
+                return intent
+
+        except Exception as e:
+            logger.error(f"Error classifying intent with AI: {str(e)}")
+            AI_API_FAILURE_COUNT += 1
+
+    # Fallback to simple classification
+    return 'ПРОЧЕЕ'
 
 
 def generate_ai_response(session, user_message):
-    """Generate AI response based on current state"""
+    """Generate AI response with fallback when API fails"""
+    global AI_API_FAILURE_COUNT
+
+    # If AI API is not healthy, use fallback immediately
+    if not is_ai_api_healthy():
+        logger.warning(f"AI API unhealthy, using fallback for {session.sender_id}")
+        return get_fallback_response(session.current_state, user_message)
 
     try:
         # Get recent messages for context
@@ -633,21 +756,33 @@ def generate_ai_response(session, user_message):
             messages.append({"role": "system", "content": products_context})
 
         # Add conversation history
-        messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages[-5:]]  # Last 5 messages
+        messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages[-5:]]
 
         completion = client.chat.completions.create(
             model="z-ai/glm-4.5-air:free",
             messages=messages,
-            timeout=15,  # Add timeout
-            max_tokens=200  # Limit response length
+            timeout=AI_API_TIMEOUT,
+            max_tokens=200
         )
 
         response = completion.choices[0].message.content
-        return response if response else "Чем могу помочь?"
+
+        if response and len(response.strip()) > 0:
+            # Success - reset failure count and update last success time
+            AI_API_FAILURE_COUNT = 0
+            global AI_API_LAST_SUCCESS
+            AI_API_LAST_SUCCESS = time.time()
+            return response
+        else:
+            # Empty response - treat as failure
+            raise Exception("Empty response from AI API")
 
     except Exception as e:
         logger.error(f"Error generating AI response for {session.sender_id}: {str(e)}")
-        return None  # Return None to trigger fallback responses
+        AI_API_FAILURE_COUNT += 1
+
+        # Return fallback response
+        return get_fallback_response(session.current_state, user_message)
 
 
 def send_message(reply, recipient_id):
