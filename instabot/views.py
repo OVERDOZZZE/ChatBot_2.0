@@ -43,7 +43,7 @@ def webhook(request):
     elif request.method == 'POST':
         try:
             data = json.loads(request.body)
-            print('------- Event received')
+            # print('------- Event received')
             for entry in data.get("entry", []):
                 if 'messaging' in entry:
                     process_message(entry['messaging'])
@@ -57,7 +57,7 @@ def webhook(request):
             return JsonResponse({"status": "Event processed"})
 
         except Exception as e:
-            print("Error processing webhook:", e)
+            # print("Error processing webhook:", e)
             return JsonResponse({"error": str(e)}, status=400)
 
 
@@ -70,15 +70,15 @@ def home_page(request):
 
 
 def process_message(data):
-    print("Message Event Received:")
-    print('Processing event... it may take a moment')
+    # print("Message Event Received:")
+    # print('Processing event... it may take a moment')
 
     for event in data:
         message = event.get("message", {})
         sender_id = event.get("sender", {}).get("id")
 
         if sender_id == BOT_ID:
-            print("Ignoring message from bot itself.")
+            # print("Ignoring message from bot itself.")
             continue
 
         text = message.get("text")
@@ -106,14 +106,14 @@ def process_message(data):
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages]
-        print(messages)
+        # print(messages)
         # 🧠 Call AI
         completion = client.chat.completions.create(
             model="z-ai/glm-4.5-air:free",
             messages=messages
         )
         reply = completion.choices[0].message.content
-        print('REPLY: ', reply)
+        # print('REPLY: ', reply)
 
         # 💬 Save bot's reply
         InstaBotMessage.objects.create(
@@ -138,7 +138,7 @@ def send_message(reply, recipient_id):
     }
     response = requests.post(url, headers=headers, json=json_body)
     data = response.json()
-    print(data)
+    # print(data)
 
 
 def process_comment(data):
