@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Боты для Instagram и WhatsApp | Автоматизация Бизнеса</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f8fafc;
+      color: #333;
+    }
+
+    header {
+      background-color: #111827;
+      color: white;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 2.5rem;
+    }
+
+    header p {
+      font-size: 1.1rem;
+      margin-top: 0.5rem;
+      color: #cbd5e1;
+    }
+
+    .container {
+      padding: 2rem;
+      max-width: 900px;
+      margin: auto;
+    }
+
+    .features, .pricing, .contact {
+      margin-top: 3rem;
+    }
+
+    h2 {
+      color: #0f172a;
+      border-bottom: 2px solid #e2e8f0;
+      padding-bottom: 0.5rem;
+    }
+
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    li {
+      margin: 1rem 0;
+      padding-left: 1.5rem;
+      position: relative;
+    }
+
+    li::before {
+      content: '✔';
+      position: absolute;
+      left: 0;
+      color: #10b981;
+    }
+
+    .pricing-cards {
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+      justify-content: space-around;
+    }
+
+    .card {
+      background-color: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.04);
+      padding: 2rem;
+      flex: 1 1 250px;
+      transition: transform 0.3s;
+    }
+
+    .card:hover {
+      transform: translateY(-5px);
+    }
+
+    .card h3 {
+      margin-top: 0;
+      color: #2563eb;
+    }
+
+    .card p {
+      font-size: 1rem;
+      margin: 0.5rem 0;
+    }
+
+    .telegram-button {
+      display: inline-block;
+      background-color: #0088cc;
+      color: white;
+      padding: 0.8rem 1.5rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: bold;
+      transition: background 0.3s;
+    }
+
+    .telegram-button:hover {
+      background-color: #0070aa;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.9rem;
+      color: #64748b;
+      margin-top: 4rem;
+      padding: 2rem 0;
+      border-top: 1px solid #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>AI-Боты для Instagram и WhatsApp</h1>
+    <p>Автоматизируйте ответы на сообщения, комментарии и заявки. Работает 24/7 без вашего участия.</p>
+  </header>
+
+  <div class="container">
+
+    <section class="features">
+      <h2>Что умеет бот?</h2>
+      <ul>
+        <li>Мгновенно отвечает на входящие сообщения в Instagram Direct и WhatsApp</li>
+        <li>Обрабатывает комментарии под постами (например, для автопродаж и акций)</li>
+        <li>Собирает заявки и передаёт их в Google Sheets, CRM или на email</li>
+        <li>Можно задать индивидуальную логику (например, отправка PDF, меню с кнопками, фильтр слов)</li>
+        <li>Использует технологии OpenAI (GPT), адаптируемые под стиль вашего бренда</li>
+      </ul>
+    </section>
+
+    <section class="pricing">
+      <h2>Тарифы</h2>
+      <div class="pricing-cards">
+        <div class="card">
+          <h3>Старт</h3>
+          <p><strong>2 500₽/мес</strong></p>
+          <p>✅ 1 платформа (Instagram <em>или</em> WhatsApp)</p>
+          <p>✅ Стандартные автоответы</p>
+          <p>✅ Установка и настройка</p>
+        </div>
+        <div class="card">
+          <h3>Бизнес</h3>
+          <p><strong>4 500₽/мес</strong></p>
+          <p>✅ Instagram + WhatsApp</p>
+          <p>✅ Расширенные сценарии (вопрос-ответ, фильтры, кнопки)</p>
+          <p>✅ Google Sheets интеграция</p>
+        </div>
+        <div class="card">
+          <h3>Премиум</h3>
+          <p><strong>Индивидуально</strong></p>
+          <p>✅ Интеграция с CRM / API</p>
+          <p>✅ Интеллектуальные цепочки сообщений</p>
+          <p>✅ Поддержка сложных запросов и тональности</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="contact">
+      <h2>Связаться</h2>
+      <p>Хотите заказать бота, посмотреть демо или задать вопрос?</p>
+      <p>Напишите в Telegram — отвечаю быстро и подробно:</p>
+      <a class="telegram-button" href="https://t.me/ssnurdan" target="_blank">Перейти в Telegram</a>
+    </section>
+
+  </div>
+
+  <footer>
+    &copy; 2025 Devs 312. Разработка AI-ботов на заказ. Работаю с Python, Django, API Meta.
+  </footer>
+
+</body>
+</html>
