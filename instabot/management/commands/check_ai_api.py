@@ -4,6 +4,9 @@ from decouple import config
 from openai import OpenAI
 import time
 
+OPENAI_API_MODEL = config('OPENAI_API_MODEL')
+OPENAI_API_KEY = config('OPENAI_API_KEY')
+
 
 class Command(BaseCommand):
     help = 'Check AI API health and performance'
@@ -17,11 +20,11 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        OPENAI_API_KEY = config('OPENAI_API_KEY')
+
         test_count = options['test_count']
 
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
+            base_url=config('BASE_OPENAI_API_URL'),
             api_key=OPENAI_API_KEY,
         )
 
@@ -38,7 +41,7 @@ class Command(BaseCommand):
             start_time = time.time()
             try:
                 completion = client.chat.completions.create(
-                    model="z-ai/glm-4.5-air:free",
+                    model=OPENAI_API_MODEL,
                     messages=[
                         {"role": "system", "content": "Ответь кратко на русском языке"},
                         {"role": "user", "content": f"Тест {i + 1}"}

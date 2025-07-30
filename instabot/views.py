@@ -11,6 +11,7 @@ from django.utils import timezone
 from datetime import timedelta
 import logging
 import time
+from groq import Groq
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ LONG_USER_ACCESS_TOKEN = config('LONG_USER_ACCESS_TOKEN')
 OPENAI_API_KEY = config('OPENAI_API_KEY')
 BOT_ID = config('BOT_ID')
 MAX_HISTORY_LENGTH = 10
+OPENAI_API_MODEL = config('OPENAI_API_MODEL')
 
 # AI API health tracking
 AI_API_LAST_SUCCESS = None
@@ -27,11 +29,14 @@ AI_API_FAILURE_COUNT = 0
 AI_API_MAX_FAILURES = 3
 AI_API_TIMEOUT = 10
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENAI_API_KEY,
-)
+# client = OpenAI(
+#     base_url=config('BASE_OPENAI_API_URL'),
+#     api_key=OPENAI_API_KEY,
+# )
 
+client = Groq(
+    api_key=config("OPENAI_API_KEY"),
+)
 
 def get_intent_prompt():
     return """Определи намерение клиента из его сообщения. Возможные намерения:
@@ -151,7 +156,7 @@ def check_ai_api_health():
     try:
         # Simple test request
         completion = client.chat.completions.create(
-            model="z-ai/glm-4.5-air:free",
+            model=OPENAI_API_MODEL,
             messages=[
                 {"role": "system", "content": "Ответь 'OK'"},
                 {"role": "user", "content": "тест"}
@@ -704,7 +709,7 @@ def classify_intent(user_message):
     if is_ai_api_healthy():
         try:
             completion = client.chat.completions.create(
-                model="z-ai/glm-4.5-air:free",
+                model="google/gemma-3n-e4b-it",
                 messages=[
                     {"role": "system", "content": get_intent_prompt()},
                     {"role": "user", "content": user_message}
@@ -759,7 +764,7 @@ def generate_ai_response(session, user_message):
         messages += [{"role": msg.role, "content": msg.content} for msg in recent_messages[-5:]]
 
         completion = client.chat.completions.create(
-            model="z-ai/glm-4.5-air:free",
+            model="google/gemma-3n-e4b-it",
             messages=messages,
             timeout=AI_API_TIMEOUT,
             max_tokens=200
